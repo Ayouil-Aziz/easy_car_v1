@@ -22,4 +22,4 @@ The main goals of this project are:
 
  -You can also use pre-designed PCB using KICAD
 
- -After the code is uploaded via usb you can use OTA to upload it next time. (**Type your IP address followed by http://admin:admin@Your IP:81/update ** ).
+ -After the code is uploaded via usb you can use OTA to upload it next time. *** Type your IP address followed by http://admin:admin@Your IP:81/update ***
