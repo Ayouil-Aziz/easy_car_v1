@@ -8,3 +8,15 @@ The main goals of this project are:
                  -Autonomate the vehicle using IOT
                  -Reduce cost by using minimal electronic components
 
+## The components that are used:
+                           -NodMcu8266
+                           -Uln2003
+                           -Diodes
+                           -5v Relays
+                           -Buck converter
+ 
+## P.S
+
+ -You can upload pre-compiled file 'easycar.bin' or 'easycar.ino' using arduino IDE.
+
+ -You can also use pre-designed PCB using KICAD
