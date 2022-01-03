@@ -1,4 +1,4 @@
-# easy_car_v1
+# Easy_car_v1
 
 This project (still under development) intends to help you in order to turn your car to act like a modern vehicle. 
 The main goals of this project are:
