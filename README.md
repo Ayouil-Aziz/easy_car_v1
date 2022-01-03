@@ -8,11 +8,11 @@ The main goals of this project are:
                  -Autonomate the vehicle using IOT
                  -Reduce cost by using minimal electronic components
 
-the compoents that are used:
+The components that are used:
                            -NodMcu8266
                            -Uln2003
                            -Diodes
                            -5v Relays
                            -Buck converter
  
-                           
+               
