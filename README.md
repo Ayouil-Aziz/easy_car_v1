@@ -9,6 +9,7 @@ The main goals of this project are:
                  -Reduce cost by using minimal electronic components
 
 ## The components that are used:
+                           
                            -NodMcu8266
                            -Uln2003
                            -Diodes
@@ -20,3 +21,5 @@ The main goals of this project are:
  -You can upload pre-compiled file 'easycar.bin' or 'easycar.ino' using arduino IDE.
 
  -You can also use pre-designed PCB using KICAD
+
+ -After the code is uploaded via usb you can use OTA to upload it next time. (**Type your IP address followed by http://admin:admin@Your IP:81/update ** ).
