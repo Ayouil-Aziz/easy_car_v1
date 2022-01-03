@@ -15,4 +15,7 @@ The components that are used:
                            -5v Relays
                            -Buck converter
  
-               
+--------------------------------------------------------------               
+
+-You can upload pre-compiled file 'easycar.bin' or 'easycar.ino' using arduino IDE.
+-You can also use pre-designed PCB using KICAD
