@@ -16,6 +16,7 @@ Easy Car v1 turns an ordinary car into a connected, smarter vehicle using a low-
 - Wi-Fi web server running on the ESP8266.
 - **Manual mode:** text and voice commands (English and French) sent from the Android app.
 - **Automatic mode:** starts or stops the car based on Wi-Fi signal strength (RSSI proximity).
+- **Neutral-safety interlock:** a hall effect sensor only allows the engine to start when the gear is in neutral, to help avoid accidental starts in gear.
 - Control of ignition / accessory, engine start/stop, central lock/unlock, windows and lights.
 - **OTA (over-the-air)** firmware updates after the first USB upload.
 - Companion Android app built with MIT App Inventor.
@@ -30,6 +31,7 @@ Easy Car v1 turns an ordinary car into a connected, smarter vehicle using a low-
 | 5V relays | Switch the car's electrical circuits |
 | Diodes | Protection against voltage spikes |
 | Buck converter | Steps the car's 12V down to 5V |
+| Hall effect sensor (A3144) | Detects when the gear is in neutral (safety interlock) |
 
 ## Repository structure
 
@@ -69,7 +71,7 @@ The control board can be fabricated from the KiCad design in `PCB/easycar.kicad_
 
 ## Electronics / Schematic
 
-The system follows a simple chain: the **NodeMCU (ESP8266)** sends 3.3V control signals to a **ULN2003** Darlington driver, which switches **5V relays**, and each relay drives one car circuit. A **5V buck converter** steps the car's 12V down to power the NodeMCU, and **flyback diodes** protect the circuit from the relay coils.
+The system follows a simple chain: the **NodeMCU (ESP8266)** sends 3.3V control signals to a **ULN2003** Darlington driver, which switches **5V relays**, and each relay drives one car circuit. A **5V buck converter** steps the car's 12V down to power the NodeMCU, and **flyback diodes** protect the circuit from the relay coils. A **hall effect sensor** feeds a neutral signal back to the NodeMCU so the engine can only start when the car is in neutral.
 
 ![Easy Car v1 wiring schematic](/IMG/schematic.png)
 
@@ -84,6 +86,7 @@ The system follows a simple chain: the **NodeMCU (ESP8266)** sends 3.3V control 
 | Lock | D3 | GPIO0 | IN5 |
 | Windows | D4 | GPIO2 | IN6 |
 | Start button (input) | D2 | GPIO4 | — |
+| Neutral sensor (hall, input) | D1 | GPIO5 | — |
 
 **Power & common:** ULN2003 pin 8 = GND, pin 9 (COM) = +12V for the relay coils; NodeMCU, ULN2003, buck converter and the car chassis all share a **common ground**.
 
