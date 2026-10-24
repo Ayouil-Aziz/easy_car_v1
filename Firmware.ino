@@ -1,345 +1,286 @@
-//-------------------------------
-//Created By Aziz Ayoujil
-//Email:ayoujil.aziz0@gmail.com
-//-------------------------------
-//
+/* =====================================================================
+ *  Easy Car v1  -  ESP8266 (NodeMCU) vehicle automation firmware
+ * ---------------------------------------------------------------------
+ *  Created by : Aziz Ayoujil
+ *  Email      : ayoujil.aziz0@gmail.com
+ *  Repo       : https://github.com/Ayouil-Aziz/easy_car_v1
+ *
+ *  The NodeMCU drives a ULN2003 + 5V relay board to control a car's
+ *  ignition, accessory/dashboard, door lock/unlock, windows and lights.
+ *
+ *  Two modes:
+ *    - Manual : text / voice commands (EN + FR) from the Android app
+ *    - Auto   : start/stop based on Wi-Fi proximity (RSSI)
+ *
+ *  OTA updates are available on port 81 at /update after the first
+ *  USB upload.
+ *
+ *  WARNING: this controls real vehicle circuits. Test safely, on a car
+ *  you own. Set your own Wi-Fi and OTA credentials below before flashing
+ *  and never commit real secrets to a public repository.
+ * ===================================================================== */
+
 #include <ESP8266WiFi.h>
 #include <WiFiClient.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266mDNS.h>
 #include <ESP8266HTTPUpdateServer.h>
 
+/* ----------------------- Configuration ------------------------------ */
+// TODO: replace these with your own values before flashing.
+const char* WIFI_SSID     = "EasyCar";          // Wi-Fi network to join
+const char* WIFI_PASSWORD = "CHANGE_ME";        // Wi-Fi password
+const char* MDNS_HOST     = "easycar";          // http://easycar.local
+const char* OTA_PATH      = "/update";          // OTA update endpoint
+const char* OTA_USERNAME  = "admin";            // CHANGE_ME
+const char* OTA_PASSWORD  = "CHANGE_ME";        // CHANGE_ME
 
-WiFiClient client;
+/* ----------------------- GPIO pin mapping --------------------------- */
+// Outputs -> ULN2003 inputs -> relays
+const int PIN_IGNITION = 12;  // D6  - engine start (momentary)
+const int PIN_ACC      = 15;  // D8  - accessory / dashboard
+const int PIN_LIGHTS   = 13;  // D7  - lights
+const int PIN_UNLOCK   = 14;  // D5  - door unlock
+const int PIN_LOCK     = 0;   // D3  - door lock
+const int PIN_WINDOWS  = 2;   // D4  - power windows
+// Input
+const int PIN_BUTTON   = 4;   // D2  - physical start button (safety interlock)
+// Sensor
+const int PIN_NEUTRAL  = 5;   // D1  - hall effect sensor (gear-in-neutral safety)
+
+/* ----------------------- Timing constants --------------------------- */
+const unsigned long IGNITION_WARMUP_MS = 7000; // ACC on before cranking
+const unsigned long CRANK_MS           = 1000; // starter engage time
+const unsigned long PULSE_MS           = 500;  // lock/unlock pulse
+const unsigned long WINDOW_TRAVEL_MS   = 2000; // window up/down time
+const unsigned long WINDOW_FULL_MS     = 8000; // full window travel
+const unsigned long CLIENT_TIMEOUT_MS  = 2000; // http client timeout
+
+/* ----------------------- Globals ------------------------------------ */
+ESP8266WebServer        httpServer(81);   // web UI + OTA
+WiFiServer              commandServer(80);// raw command channel (app)
+ESP8266HTTPUpdateServer httpUpdater;
+WiFiClient              client;
+
+String header;
+String command = "";
+
+/* Simple web form served on port 81 */
 const char MAIN_page[] PROGMEM = R"=====(
 <!DOCTYPE html>
 <html>
-<body>
-<h2>By Aziz Ayoujil<h2>
-<h3> Easy car v 0.1</h3>
-
-<form action="/gear">
-  data:<br>
-  <input type="text" name="data" value="Easy car">
-  <br>
- 
-</form> 
-
-</body>
+  <head><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+  <body style="font-family:Helvetica;text-align:center;">
+    <h2>Easy Car v1</h2>
+    <h3>by Aziz Ayoujil</h3>
+    <form action="/action_page">
+      Command:<br>
+      <input type="text" name="data" value="automode">
+      <input type="submit" value="Send">
+    </form>
+  </body>
 </html>
 )=====";
 
-const char* host = "172.20.10.3";
-const char* update_path = "/update";
-const char* update_username = "admin";
-const char* update_password = "admin";
-const char* ssid = "EasyCar";
-const char* password = "azizEasy@car";
-String header;
+/* ===================================================================== */
+/*  Helpers                                                              */
+/* ===================================================================== */
 
-// Auxiliary variables to store the current output state
-String output5State = "zri";
-// Assign output variables to GPIO pins
-//const int output5 = 1;
-
-const int buttonPin = 4;   
-int buttonState = 0;        
-unsigned long currentTime = millis();
-unsigned long previousTime = 0; 
-const long timeoutTime = 2000;
-String  command =""; // Command received from Android device
-
-int igacc = 15;
-int lights = 13;
-int ig = 12;
-
-int lock = 0;
-int windows= 2; 
-int unlock = 14;
-
-ESP8266WebServer httpServer(81);
-
-WiFiServer server(80);
-
-ESP8266HTTPUpdateServer httpUpdater;
-
-
-void handleRoot() {
- String s = MAIN_page; //Read HTML contents
- httpServer.send(200, "text/html", s); //Send web page
+// Briefly pulse an output (used for lock/unlock/crank).
+void pulse(int pin, unsigned long ms) {
+  digitalWrite(pin, HIGH);
+  delay(ms);
+  digitalWrite(pin, LOW);
 }
 
-void handleForm() {
- String data = httpServer.arg("data"); 
- httpServer.send(200, "text/html"); //Send web page
-if (data =="automode") {
-   automode();
-    }
-else if (data=="manual"){
-    manual();
-    }
+void rebootDevice() {
+  delay(1000);
+  ESP.reset();
 }
 
-  
- void Start (){
- 
-  if (digitalRead(buttonPin) ==HIGH && digitalRead(igacc)==LOW)digitalWrite(igacc, HIGH),delay (7000),digitalWrite(ig,HIGH),delay(1000),digitalWrite(ig,LOW),digitalWrite(unlock,HIGH),delay(500),digitalWrite(unlock,LOW);
+// Neutral-safety interlock: returns true when the gear lever is in
+// neutral. A digital hall sensor (e.g. A3144) pulls its output LOW when
+// the magnet on the gear linkage is near it.
+bool inNeutral() {
+  return digitalRead(PIN_NEUTRAL) == LOW;
+}
 
+/* ===================================================================== */
+/*  Car actions                                                          */
+/* ===================================================================== */
 
+// Start sequence: only if the physical button is pressed, the car is
+// currently off (accessory line LOW), AND the gear is in neutral (hall
+// sensor). Turns on ACC, waits, cranks the starter, then unlocks.
+void startCar() {
+  // Safety: only crank when the button is pressed, the car is off, AND
+  // the gearbox is in neutral (hall sensor). Prevents starting in gear.
+  if (digitalRead(PIN_BUTTON) == HIGH && digitalRead(PIN_ACC) == LOW && inNeutral()) {
+    digitalWrite(PIN_ACC, HIGH);
+    delay(IGNITION_WARMUP_MS);
+    pulse(PIN_IGNITION, CRANK_MS);
+    pulse(PIN_UNLOCK, PULSE_MS);
   }
-   void Stop (){
-    if (digitalRead(buttonPin) ==HIGH && digitalRead(igacc)==HIGH )digitalWrite(lock,HIGH),delay(500),digitalWrite(lock,LOW),digitalWrite(igacc, LOW),restarta();
+}
 
+// Stop sequence: only if the button is pressed and the car is on.
+// Locks the doors, cuts the accessory line, then reboots the board.
+void stopCar() {
+  if (digitalRead(PIN_BUTTON) == HIGH && digitalRead(PIN_ACC) == HIGH) {
+    pulse(PIN_LOCK, PULSE_MS);
+    digitalWrite(PIN_ACC, LOW);
+    rebootDevice();
   }
-void automode(){
+}
+
+// Proximity mode: start/stop based on Wi-Fi signal strength (RSSI).
+// Strong signal (near) -> start; weak signal (far) -> stop.
+void autoMode() {
   long rssi = WiFi.RSSI();
   Serial.print("RSSI: ");
   Serial.println(rssi);
   delay(500);
- 
 
-  if (rssi <= -20 & rssi >= -70) {
-       Start();
-       
-
+  if (rssi <= -20 && rssi >= -70) {        // close
+    startCar();
+  } else if (rssi <= -80 && rssi >= -90) { // far
+    stopCar();
+  } else if (rssi >= 0) {                   // invalid / disconnected
+    stopCar();
+    delay(1000);
+    rebootDevice();
   }
- else if (rssi <= -80 & rssi >= -90) {
-       Stop();
-
-       
-  } 
-   else if (rssi >=0) {
-       Stop();
-              delay(1000);
-              restarta();
-
-       
-  } 
-
-
-  
-  
-  }
-
-
-
-
-void setup()
-{
-  
-  Serial.begin(115200);
- 
-  pinMode(ig, OUTPUT); 
-  pinMode(igacc, OUTPUT);  
-  pinMode(lock, OUTPUT);  
-  pinMode(unlock, OUTPUT);  
-  pinMode(lights, OUTPUT);  
-  pinMode(windows, OUTPUT);
-  pinMode(buttonPin, INPUT);
-
-
-  digitalWrite(ig,LOW);
-  digitalWrite(igacc,LOW);
-  digitalWrite(lock,LOW);
-  digitalWrite(unlock,LOW);
-  digitalWrite(lights,LOW);
-  digitalWrite(windows,LOW);
-  WiFi.softAPdisconnect (true);
-
-  connectWiFi();
-  server.begin();
-
-  httpServer.begin();
-
-  httpServer.on("/", handleRoot);      //Which routine to handle at root location
-  httpServer.on("/action_page", handleForm); //form action is handled here
-  MDNS.begin(host);
-  //TạhttpSo server
-  httpUpdater.setup(&httpServer, update_path, update_username, update_password);
-
-  MDNS.addService("http", "tcp", 81);
-  //Serial.printf("HTTPUpdateServer ready! Open http://%s.local%s in your browser and login with username '%s' and password '%s'\n", host, update_path, update_username, update_password);
-
 }
- 
-void loop()
-{
-httpServer.handleClient();
-handleForm();
-client.stop();
-delay(100);
 
+/* ===================================================================== */
+/*  Command channel (Android app, port 80)                              */
+/* ===================================================================== */
 
-
-}
- 
-/* connecting WiFi */
-void connectWiFi()
-{
-  Serial.println("Connecting to WIFI");
-  WiFi.begin(ssid, password);
-  while ((!(WiFi.status() == WL_CONNECTED)))
-  {
-    delay(300);
-    Serial.print("..");
-  }
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("NodeMCU Local IP is : ");
-  Serial.print((WiFi.localIP()));
-}
- 
-/* check command received from Android Device */
-String checkClient (void)
-{
-  while(!client.available()) delay(1); 
+// Read one command line from the raw TCP client and strip the HTTP verb
+// and trailing protocol text, leaving just the command word.
+String readCommand() {
+  while (!client.available()) delay(1);
   String request = client.readStringUntil('\r');
-  request.remove(0, 5);
-  request.remove(request.length()-9,9);
+  request.remove(0, 5);                       // strip "GET /"
+  request.remove(request.length() - 9, 9);    // strip " HTTP/1.1"
   return request;
-
 }
- 
-/* send command echo back to android device */
-void sendBackEcho(String echo)
-{
-  client.println("HTTP/1.1 200 OK ");
+
+void sendBackEcho(const String& echo) {
+  client.println("HTTP/1.1 200 OK");
   client.println("Content-Type: text/html");
-  client.println("");
-  client.println("<!DOCTYPE HTML>");
-  client.println("<html>");
-  client.println(echo);
-  client.println("</html>");
+  client.println();
+  client.println("<!DOCTYPE HTML><html>" + echo + "</html>");
   client.stop();
   delay(1);
 }
 
- 
-
-
-
-
-void restarta(){
-
-delay(1000);
-
-  ESP.reset();
+// Parse and run a single manual command. Accepts English and French
+// keywords (including a few voice-recognition fallbacks).
+void handleCommand(const String& cmd) {
+  if (cmd == "start" || cmd == "démarrer") {
+    startCar();
+  } else if (cmd == "stop" || cmd == "arrêter") {
+    stopCar();
+  } else if (cmd == "unlock" || cmd == "ouvrir" || cmd == "ouvrez") {
+    pulse(PIN_UNLOCK, PULSE_MS);
+  } else if (cmd == "lock" || cmd == "ferme") {
+    pulse(PIN_LOCK, PULSE_MS);
+  } else if (cmd == "lighton" || cmd == "light") {
+    digitalWrite(PIN_LIGHTS, HIGH);
+  } else if (cmd == "lightoff" || cmd == "light off") {
+    digitalWrite(PIN_LIGHTS, LOW);
+  } else if (cmd == "dashon" || cmd == "dashboard") {
+    digitalWrite(PIN_ACC, HIGH);
+  } else if (cmd == "dashoff" || cmd == "off") {
+    digitalWrite(PIN_ACC, LOW);
+  } else if (cmd == "windowup" || cmd == "window") {
+    pulse(PIN_WINDOWS, WINDOW_TRAVEL_MS);
+  } else if (cmd == "lockandwindows") {
+    digitalWrite(PIN_ACC, HIGH);
+    pulse(PIN_LOCK, PULSE_MS);
+    pulse(PIN_WINDOWS, WINDOW_FULL_MS);
   }
-void manual(){
-   
-    client = server.available();
-    if (!client) return; 
-command = checkClient ();
- 
-         if (command == "start"  || command == "start"    || command == "démarrer" || command == "que" || command == "quel" || command == "coeur" )Start();
-    else if (command == "stop" || command == "stop" || command == "arrêter" || command == "6" || command == "merci" || command == "jeune")Stop();
-    
-    else if (command == "unlock"  || command == "personne"   || command == "argent"  || command == "ouvrez"  || command == "ouvrir" )      digitalWrite(unlock,1), delay(500),digitalWrite(unlock,0); 
-    else if (command == "lock" || command == "argile" ||command == "jeux" || command == "gilles" ||command == "ferme"  || command == "algérie" )digitalWrite(lock,1), delay(500),digitalWrite(lock,0);   /* add windows here*/
-    
-    else if (command == "lighton"  || command == "acide"    || command == "light") digitalWrite(lights,1);
-    else if (command == "lightoff" || command == "si" || command == "light off")  digitalWrite(lights,0);
-    
-    else if (command == "dashon"  || command == "tableau"    || command == "dashboard")digitalWrite(igacc,1),delay(500),digitalWrite(igacc,1);
-    else if (command == "dashoff" || command == "si" || command == "off")digitalWrite(igacc,0),delay(500),digitalWrite(igacc,1);
-    
-    else if (command == "windowup" || command == "window" || command == "sergent")digitalWrite(windows,1),delay(2000),digitalWrite(windows,0);
-    else if (command == "lockandwin1" || command == "window" || command == "sergent")digitalWrite(igacc,1),digitalWrite(lock,1), delay(500),digitalWrite(lock,0),digitalWrite(windows,1),digitalWrite(windows,1),delay(8000),digitalWrite(windows,0);
-    gear();
+}
 
+// Listen for a manual command from the Android app and act on it.
+void manualMode() {
+  client = commandServer.available();
+  if (!client) return;
 
+  command = readCommand();
+  handleCommand(command);
+  sendBackEcho(command);
+  command = "";
+}
 
-    sendBackEcho(command); // send command echo back to android device
-    command = "";
-  }  
- 
-void gear(){
-  
-  WiFiClient client = server.available();   // Listen for incoming clients
+/* ===================================================================== */
+/*  Web form handlers (port 81)                                         */
+/* ===================================================================== */
 
-  if (client) {                             // If a new client connects,
-    Serial.println("New Client.");          // print a message out in the serial port
-    String currentLine = "";                // make a String to hold incoming data from the client
-    currentTime = millis();
-    previousTime = currentTime;
-    while (client.connected() && currentTime - previousTime <= timeoutTime) { // loop while the client's connected
-      currentTime = millis();         
-      if (client.available()) {             // if there's bytes to read from the client,
-//        header = client.readStringUntil('\r');
-        char c = client.read();             // read a byte, then
-        Serial.write(c);                    // print it out the serial monitor
-       header += c;
-        if (c == '\n') {                    // if the byte is a newline character
-          // if the current line is blank, you got two newline characters in a row.
-          // that's the end of the client HTTP request, so send a response:
-          if (currentLine.length() == 0) {
-            // HTTP headers always start with a response code (e.g. HTTP/1.1 200 OK)
-            // and a content-type so the client knows what's coming, then a blank line:
-            client.println("HTTP/1.1 200 OK");
-            client.println("Content-type:text/html");
-            client.println("Connection: close");
-            client.println();
-            Serial.println(header);
-            
-            // turns the GPIOs on and off
-              buttonState = digitalRead(buttonPin);
+void handleRoot() {
+  httpServer.send(200, "text/html", FPSTR(MAIN_page));
+}
 
-            if (header.indexOf("GET /5/on")  && buttonState == HIGH) {
-              Serial.println("GPIO 5 on");
-              output5State = "orzri";
-              
-              //digitalWrite(output5, HIGH);
-            } else if (header.indexOf("GET /5/off")  && buttonState == LOW) {
-              Serial.println("GPIO 5 off");
-              output5State = "zri";
-             // digitalWrite(output5, LOW);
-           
-            }
-            
-            // Display the HTML web page
-            client.println("<!DOCTYPE html><html>");
-            client.println("<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-            client.println("<link rel=\"icon\" href=\"data:,\">");
-            // CSS to style the on/off buttons 
-            // Feel free to change the background-color and font-size attributes to fit your preferences
-            client.println("<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center;}");
-            client.println(".button { background-color: #195B6A; border: none; color: white; padding: 16px 40px;");
-            client.println("text-decoration: none; font-size: 30px; margin: 2px; cursor: pointer;}");
-            client.println(".button2 {background-color: #77878A;}</style></head>");
-            
-            // Web Page Heading
-            client.println("<body><h1>ESP8266 Web Server</h1>");
-            
-            // Display current state, and ON/OFF buttons for GPIO 5  
-            client.println("<p>GPIO 5 - State" + output5State + "</p>");
-            // If the output5State is off, it displays the ON button       
-            if (output5State=="zri") {
-              client.println("<p><a href=\"/5/on\"><button class=\"button\">ON</button></a></p>");
-            } else {
-              client.println("<p><a href=\"/5/off\"><button class=\"button button2\">OFF</button></a></p>");
-            } 
-               
-            
-            
-            client.println("</body></html>");
-            
-            // The HTTP response ends with another blank line
-            client.println();
-            // Break out of the while loop
-            break;
-          } else { // if you got a newline, then clear currentLine
-            currentLine = "";
-          }
-        } else if (c != '\r') {  // if you got anything else but a carriage return character,
-          currentLine += c;      // add it to the end of the currentLine
-        }
-      }
-    }
-    // Clear the header variable
-    header = "";
-    // Close the connection
-    client.stop();
-    Serial.println("Client disconnected.");
-    Serial.println("");
+void handleForm() {
+  String data = httpServer.arg("data");
+  httpServer.send(200, "text/html", "OK");
+  if (data == "automode") {
+    autoMode();
+  } else if (data == "manual") {
+    manualMode();
   }
-} 
+}
+
+/* ===================================================================== */
+/*  Wi-Fi                                                                */
+/* ===================================================================== */
+
+void connectWiFi() {
+  Serial.println("Connecting to Wi-Fi...");
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(300);
+    Serial.print(".");
+  }
+  Serial.println("\nWi-Fi connected. IP: " + WiFi.localIP().toString());
+}
+
+/* ===================================================================== */
+/*  Setup / loop                                                         */
+/* ===================================================================== */
+
+void setup() {
+  Serial.begin(115200);
+
+  const int outputs[] = {PIN_IGNITION, PIN_ACC, PIN_LIGHTS,
+                         PIN_UNLOCK, PIN_LOCK, PIN_WINDOWS};
+  for (int pin : outputs) {
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, LOW);   // all circuits off at boot
+  }
+  pinMode(PIN_BUTTON, INPUT);
+  pinMode(PIN_NEUTRAL, INPUT);   // hall effect neutral sensor
+
+  WiFi.softAPdisconnect(true);
+  connectWiFi();
+
+  commandServer.begin();
+  httpServer.on("/", handleRoot);
+  httpServer.on("/action_page", handleForm);
+  httpServer.begin();
+
+  MDNS.begin(MDNS_HOST);
+  httpUpdater.setup(&httpServer, OTA_PATH, OTA_USERNAME, OTA_PASSWORD);
+  MDNS.addService("http", "tcp", 81);
+
+  Serial.printf("OTA ready at http://%s.local:81%s\n", MDNS_HOST, OTA_PATH);
+}
+
+void loop() {
+  httpServer.handleClient();
+  handleForm();
+  MDNS.update();
+  delay(100);
+}
